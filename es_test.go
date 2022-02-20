@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	es "github.com/baiyeth/elasticsearch"
+	"github.com/baiyeth/es"
 )
 
 var esStr = `{
@@ -106,11 +106,11 @@ var esStr = `{
 func TestNewClient(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	addresses := []string{"http://127.0.0.1:29200"}
+	addresses := []string{"http://127.0.0.1:9200"}
 	userName := "es"
 	passWord := "es"
 	cli := es.NewClient(ctx, addresses, es.WithAuth(userName, passWord), es.WithMaxRetries(5), es.WithSniff(false))
-	fmt.Println(cli.Ping("http://127.0.0.1:29200"))
+	fmt.Println(cli.Ping("http://127.0.0.1:9200"))
 	fmt.Println(cli.GetIndices("gate"))
 }
 
@@ -218,15 +218,96 @@ func TestGjson(t *testing.T) {
 func TestSearch(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	addresses := []string{"http://127.0.0.1:29200"}
+	addresses := []string{"http://127.0.0.1:9200"}
 	userName := "es"
 	passWord := "es"
 	cli := es.NewClient(ctx, addresses, es.WithAuth(userName, passWord), es.WithMaxRetries(5), es.WithSniff(false))
-	in := make(map[string]interface{})
-	err := json.Unmarshal([]byte(esStr), &in)
+	in1 := make(map[string]interface{})
+	err := json.Unmarshal([]byte(esStr), &in1)
 	if err != nil {
 		fmt.Println(err)
 		return
+	}
+	in := es.QueryInput{
+		Query: &es.QueryItem{
+			Match: &es.Match{
+				Field: "field1",
+				Query: []interface{}{
+					"value1",
+					"value2",
+				},
+				Weight: []float64{1},
+			},
+			Or: &es.Or{
+				Range: &es.Range{
+					Field: "field1",
+					Query: &es.RangeQuery{
+						Left: es.RangeRegion{
+							Value: "left",
+						},
+						Right: es.RangeRegion{
+							Value: "right",
+							Op:    "<",
+						},
+					},
+				},
+				Term: &es.Term{
+					Field: "field1",
+					Query: []interface{}{
+						"value1",
+					},
+				},
+			},
+			And: &es.And{
+				Or: &es.Or{
+					Range: &es.Range{
+						Field: "field1",
+						Query: &es.RangeQuery{
+							Left: es.RangeRegion{
+								Value: "left",
+								Op:    ">=",
+							},
+							Right: es.RangeRegion{
+								Value: "right",
+								Op:    ">=",
+							},
+						},
+					},
+					Term: &es.Term{
+						Field: "field1",
+						Query: []interface{}{
+							"value1",
+							"value2",
+						},
+					},
+				},
+				Match: &es.Match{
+					Field: "field1",
+					Query: []interface{}{
+						"value1",
+						"value2",
+					},
+					Weight: []float64{1},
+				},
+			},
+			Not: &es.Not{
+				Match: &es.Match{
+					Field: "field1",
+					Query: []interface{}{
+						"value1",
+						"value2",
+					},
+					Weight: []float64{1},
+				},
+			},
+		},
+		Sort: es.Sort{
+			"field1": "desc",
+			"field2": "asc",
+		},
+		Ret:  []string{"_source"},
+		From: 0,
+		Size: 10,
 	}
 	esResult, _ := cli.Search("test_index", in, 0, 10)
 	fmt.Println(esResult)
@@ -235,16 +316,16 @@ func TestSearch(t *testing.T) {
 func TestGenQueryDSL(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	addresses := []string{"http://127.0.0.1:29200"}
+	addresses := []string{"http://127.0.0.1:9200"}
 	userName := "es"
 	passWord := "es"
-	cli := es.NewClient(ctx, addresses, es.WithAuth(userName, passWord), es.WithMaxRetries(5), es.WithSniff(false))
+	_ = es.NewClient(ctx, addresses, es.WithAuth(userName, passWord), es.WithMaxRetries(5), es.WithSniff(false))
 	in := make(map[string]interface{})
 	err := json.Unmarshal([]byte(esStr), &in)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	esResult, _ := cli.GenQueryDSL(in["query"].(map[string]interface{}))
-	fmt.Println(esResult)
+	// esResult, _ := cli.GenQueryDSL(in["query"].(map[string]interface{}))
+	// fmt.Println(esResult)
 }
