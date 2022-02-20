@@ -182,24 +182,35 @@ func (es *ElasticSearch) Bulk(index string, dataList []map[string]interface{}, d
 }
 
 // Search ...
-func (es *ElasticSearch) Search(index string, in map[string]interface{}, from int, size int) (*elastic.SearchResult, error) {
+func (es *ElasticSearch) Search(index string, in QueryInput, from int, size int) (*elastic.SearchResult, error) {
 	query := elastic.NewBoolQuery()
-	queryDSL := es.genQueryDSL(query, in["query"].(map[string]interface{}))
-	sorter := es.genSorter(in["sort"].(map[string]interface{}))
-	return es.cli.Search().
+	queryDSL := es.genQueryDSL(query, "", in.Query, in.QueryString)
+	searchService := es.cli.Search().
 		Index(index).
-		Query(queryDSL).
-		SortBy(sorter...).
-		From(from).
-		Size(size).
-		Pretty(true).
-		Do(es.ctx)
+		Query(queryDSL)
+	if len(in.Ret.Includes) != 0 || len(in.Ret.Excludes) != 0 {
+		fsc := elastic.NewFetchSourceContext(true)
+		fsc.Include(in.Ret.Includes...)
+		fsc.Exclude(in.Ret.Excludes...)
+		searchService = searchService.FetchSourceContext(fsc)
+	}
+	if len(in.Sort) != 0 {
+		sorter := es.genSorter(in.Sort)
+		searchService = searchService.SortBy(sorter...)
+	}
+	if size != 0 {
+		searchService = searchService.Size(size)
+	} else {
+		searchService = searchService.Size(10)
+	}
+	searchService = searchService.From(from).Pretty(true)
+	return searchService.Do(es.ctx)
 }
 
 // GenQueryDSL 生成es原语
-func (es *ElasticSearch) GenQueryDSL(in map[string]interface{}) (string, error) {
+func (es *ElasticSearch) GenQueryDSL(in map[string]interface{}, ins string) (string, error) {
 	query := elastic.NewBoolQuery()
-	queryDSL := es.genQueryDSL(query, in)
+	queryDSL := es.genQueryDSL(query, "", in, ins)
 	data, err := queryDSL.Source()
 	dataStr, _ := json.MarshalIndent(data, "", "    ")
 	return string(dataStr), err
@@ -341,13 +352,19 @@ type And map[string]interface{}
 // Not 组合逻辑
 type Not map[string]interface{}
 
+type Ret struct {
+	Includes []string
+	Excludes []string
+}
+
 // QueryInput 查询结构
 type QueryInput struct {
-	Query map[string]interface{} `json:"query"`
-	Ret   []string               `json:"ret"`
-	Sort  Sort                   `json:"sort"`
-	From  int                    `json:"from"`
-	Size  int                    `json:"size"`
+	Query       map[string]interface{} `json:"query,omitempty"`
+	QueryString string                 `json:"query_string,omitempty"`
+	Ret         Ret                    `json:"ret"`
+	Sort        Sort                   `json:"sort"`
+	From        int                    `json:"from"`
+	Size        int                    `json:"size"`
 }
 
 var logicKey = map[string]bool{
@@ -372,13 +389,32 @@ var logicKey = map[string]bool{
 // 	"from": 0,
 // 	"size": 10
 // }
-func (es *ElasticSearch) genQueryDSL(query *elastic.BoolQuery, in map[string]interface{}) elastic.Query {
+func (es *ElasticSearch) genQueryDSL(query *elastic.BoolQuery, logic string, in map[string]interface{}, instr string) elastic.Query {
+	if len(in) == 0 && instr == "" {
+		return query
+	}
+	if len(in) == 0 {
+		err := json.Unmarshal([]byte(instr), &in)
+		if err != nil {
+			return query
+		}
+	}
+	queryFunc := query.Filter
+	switch logic {
+	case "and":
+		queryFunc = query.Must
+	case "or":
+		queryFunc = query.Should
+	case "not":
+		queryFunc = query.MustNot
+	default:
+	}
 	for k, v := range in {
 		k = strings.ToLower(k)
 		// 非嵌套结构
 		if !logicKey[k] {
 			switch k {
-			case "terms":
+			case "term":
 				nv := Term{}
 				err := mapstructure.Decode(v, &nv)
 				if err != nil {
@@ -386,9 +422,9 @@ func (es *ElasticSearch) genQueryDSL(query *elastic.BoolQuery, in map[string]int
 				}
 				// name string, value interface{}
 				if len(nv.Query) == 1 {
-					query = query.Filter(elastic.NewTermQuery(nv.Field, nv.Query[0]))
+					query = queryFunc(elastic.NewTermQuery(nv.Field, nv.Query[0]))
 				} else if len(nv.Query) > 1 {
-					query = query.Filter(elastic.NewTermsQuery(nv.Field, nv.Query))
+					query = queryFunc(elastic.NewTermsQuery(nv.Field, nv.Query))
 				}
 			case "range":
 				nv := Range{}
@@ -421,14 +457,14 @@ func (es *ElasticSearch) genQueryDSL(query *elastic.BoolQuery, in map[string]int
 				default:
 					rgQuery = rgQuery.Lt(nv.Query.Right.Value)
 				}
-				query = query.Filter(rgQuery)
+				query = queryFunc(rgQuery)
 			case "exists":
 				nv := Exists{}
 				err := mapstructure.Decode(v, &nv)
 				if err != nil {
 					continue
 				}
-				query = query.Filter(elastic.NewExistsQuery(nv.Field).QueryName(nv.Query))
+				query = queryFunc(elastic.NewExistsQuery(nv.Field).QueryName(nv.Query))
 			case "match":
 				nv := Match{}
 				err := mapstructure.Decode(v, &nv)
@@ -440,7 +476,7 @@ func (es *ElasticSearch) genQueryDSL(query *elastic.BoolQuery, in map[string]int
 					if i >= len(nv.Weight) {
 						nv.Weight = append(nv.Weight, 1.0)
 					}
-					query = query.Filter(elastic.NewMatchQuery(nv.Field, val).Boost(nv.Weight[i]))
+					query = queryFunc(elastic.NewMatchQuery(nv.Field, val).Boost(nv.Weight[i]))
 				}
 			case "multi_match":
 				nv := MultiMatch{}
@@ -449,14 +485,14 @@ func (es *ElasticSearch) genQueryDSL(query *elastic.BoolQuery, in map[string]int
 					continue
 				}
 				// text interface{}, fields ...string
-				query = query.Filter(elastic.NewMultiMatchQuery(nv.Query, nv.Fields...))
+				query = queryFunc(elastic.NewMultiMatchQuery(nv.Query, nv.Fields...))
 			case "geo_bounding_box":
 				nv := GeoBoundingBox{}
 				err := mapstructure.Decode(v, &nv)
 				if err != nil {
 					continue
 				}
-				query = query.Filter(elastic.NewGeoBoundingBoxQuery(nv.Field).
+				query = queryFunc(elastic.NewGeoBoundingBoxQuery(nv.Field).
 					TopLeft(nv.TopLeft.Lon, nv.TopLeft.Lat).
 					BottomRight(nv.BottomRight.Lon, nv.BottomRight.Lat))
 			case "geo_distance":
@@ -465,36 +501,27 @@ func (es *ElasticSearch) genQueryDSL(query *elastic.BoolQuery, in map[string]int
 				if err != nil {
 					continue
 				}
-				query = query.Filter(elastic.NewGeoDistanceQuery(nv.Field).
+				query = queryFunc(elastic.NewGeoDistanceQuery(nv.Field).
 					Point(nv.Location.Lat, nv.Location.Lon).
 					Distance(nv.Distance))
 			default:
 				continue
 			}
 		} else {
-			newQuery := elastic.NewBoolQuery()
-			es.genQueryDSL(newQuery, v.(map[string]interface{}))
-			switch k {
-			case "and":
-				query = query.Must(newQuery)
-			case "or":
-				query = query.Should(newQuery)
-			case "not":
-				query = query.MustNot(newQuery)
-			}
+			var newQuery = elastic.NewBoolQuery()
+			es.genQueryDSL(newQuery, k, v.(map[string]interface{}), "")
+			query = queryFunc(newQuery)
 		}
 	}
 	return query
 }
 
-func (es *ElasticSearch) genSorter(in map[string]interface{}) []elastic.Sorter {
-	inSort := Sort{}
-	err := mapstructure.Decode(in, &inSort)
-	if err != nil {
+func (es *ElasticSearch) genSorter(in Sort) []elastic.Sorter {
+	if len(in) == 0 {
 		return []elastic.Sorter{}
 	}
 	var sorter = make([]elastic.Sorter, 0)
-	for k, v := range inSort {
+	for k, v := range in {
 		var sort *elastic.FieldSort
 		if v == "desc" {
 			sort = elastic.NewFieldSort(k).Order(false)
