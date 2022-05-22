@@ -76,7 +76,7 @@ func NewClient(ctx context.Context, addresses []string, options ...elastic.Clien
 	options = append(options, WithUrls(addresses...))
 	cli, err := elastic.NewClient(options...)
 	if err != nil {
-		panic(err)
+		return nil
 	}
 	return &ElasticSearch{
 		ctx: ctx,
@@ -94,7 +94,7 @@ func NewDefaultClient(ctx context.Context, username, password string, addresses 
 		WithMaxRetries(5))
 	cli, err := elastic.NewClient(options...)
 	if err != nil {
-		panic(err)
+		return nil
 	}
 	return &ElasticSearch{
 		ctx: ctx,
